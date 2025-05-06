@@ -88,10 +88,32 @@ const summarizeHandler: RequestHandler<{}, SummaryResponseBody, SummarizeRequest
     console.log(`  Sending ${truncatedComments.length} chars of comments to OpenAI for summarization...`); 
 
     const openaiResponse = await openai.chat.completions.create({ // Use await
-        model: 'gpt-3.5-turbo',
+        model: 'gpt-4.1-nano',
         messages: [
           { role: 'system', content: 'You are a helpful assistant that summarizes Hacker News comment threads.' },
-          { role: 'user', content: `Please summarize the following comments concisely:\n\n${truncatedComments}` },
+          { role: 'user', content: `Below is a list of comments from a Hacker News discussion. Your job is to:
+
+1. **Concise Overview**  
+   • In 2–3 sentences, summarize the overall topic and why it’s sparking conversation.
+
+2. **Top Insights**  
+   • Identify the three most interesting or surprising points raised by different commenters.  
+   • For each, include the commenter’s username (if available), their core argument, and why it matters.
+
+3. **Technical or Practical Details**  
+   • Extract any concrete tips, code snippets, benchmarks, tools, or links that would be useful to someone following this thread.  
+   • List each as a bullet with a one-sentence explanation of its relevance.
+
+4. **Areas of Consensus & Contention**  
+   • Describe in brief where the commenters largely agree (consensus).  
+   • Describe the strongest point of disagreement (contention) and the key arguments on both sides.
+
+5. **Unanswered Questions & Next Steps**  
+   • List any open questions people are asking that could guide further investigation.  
+   • Suggest one actionable next step or resource (article, library, tool) someone could explore based on this thread.
+
+
+\n\n${truncatedComments}` },
         ],
         max_tokens: 150,
     });
