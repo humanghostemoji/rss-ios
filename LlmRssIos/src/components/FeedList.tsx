@@ -12,6 +12,8 @@ export type FeedItem = {
   links: { url: string; rel: string }[]; // Parser often gives links array
   description?: string; // Optional description
   published?: string; // Optional published date string
+  comments?: string; // Add optional comments field based on typical RSS parser output
+  commentLink?: string; // Add field to specifically store the HN comment link
   // Add other fields if needed, e.g., authors: { name: string }[]
 };
 

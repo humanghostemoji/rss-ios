@@ -39,7 +39,34 @@ const FeedListScreen = ({ navigation }: Props) => {
         }
         const responseData = await response.text();
         const parsed = await rssParser.parse(responseData);
-        setFeeds(Array.isArray(parsed.items) ? parsed.items : []);
+        
+        // Process items to extract the correct comment link
+        const processedItems = (Array.isArray(parsed.items) ? parsed.items : []).map((item: FeedItem) => {
+          let hnCommentLink: string | undefined = undefined;
+          
+          // Extract HN comment URL from the description field's <a> tag href
+          if (item.description) {
+            const match = item.description.match(/<a href="(https?:\/\/news\.ycombinator\.com\/item\?id=\d+)">/);
+            if (match && match[1]) {
+              hnCommentLink = match[1];
+            }
+          }
+          
+          // Fallback: If not in description, check 'comments' or 'id' (less likely now)
+          // Example: some feeds might put it in item.comments or item.id
+          if (!hnCommentLink && item.comments && typeof item.comments === 'string' && item.comments.includes('news.ycombinator.com/item?id=')) {
+              hnCommentLink = item.comments;
+          } else if (!hnCommentLink && item.id && typeof item.id === 'string' && item.id.includes('news.ycombinator.com/item?id=')) {
+              hnCommentLink = item.id;
+          }
+          
+          return {
+            ...item,
+            commentLink: hnCommentLink, // Add the extracted link
+          };
+        });
+        
+        setFeeds(processedItems);
       } catch (e) {
         console.error("Failed to fetch or parse feed:", e);
         setError(e instanceof Error ? e.message : 'An unknown error occurred');
