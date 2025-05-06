@@ -41,7 +41,7 @@ const FeedDetailScreen = ({ route }: Props) => {
       }
       
       try {
-        const backendUrl = 'http://localhost:3001/api/summarize'; 
+        const backendUrl = 'https://backend-quiet-shadow-7161.fly.dev/api/summarize'; 
         console.log(`Attempting to fetch summaries from ${backendUrl}`);
         console.log(`  Comment URL: ${commentUrl}`);
         console.log(`  Article URL: ${articleUrl}`);
@@ -113,10 +113,14 @@ const FeedDetailScreen = ({ route }: Props) => {
                 <ActivityIndicator size="large" color="#007AFF" /> 
               </View>
             )}
-            {/* Ensure error is a string before rendering */}
-            {articleError && <Text style={styles.errorText}>Article Error: {articleError || 'Unknown error'}</Text>}
-            {/* Ensure summary is a string before rendering */}
-            {articleSummary && <Text style={styles.summaryText}>{articleSummary || ''}</Text>}
+            {/* Only render error Text if articleError exists */}
+            {articleError && (
+              <Text style={styles.errorText}>Article Error: {articleError}</Text>
+            )}
+            {/* Only render summary Text if articleSummary exists */}
+            {articleSummary && (
+              <Text style={styles.summaryText}>{articleSummary}</Text>
+            )}
             {!isArticleLoading && !articleError && !articleSummary && (
                 <Text style={styles.infoText}>Article summary not available or could not be generated.</Text>
             )}
@@ -136,10 +140,14 @@ const FeedDetailScreen = ({ route }: Props) => {
                 <ActivityIndicator size="large" color="#007AFF" /> 
               </View>
             )}
-            {/* Ensure error is a string before rendering */}
-            {commentError && <Text style={styles.errorText}>Comment Error: {commentError || 'Unknown error'}</Text>}
-            {/* Ensure summary is a string before rendering */}
-            {commentSummary && <Text style={styles.summaryText}>{commentSummary || ''}</Text>}
+            {/* Only render error Text if commentError exists */}
+            {commentError && (
+              <Text style={styles.errorText}>Comment Error: {commentError}</Text>
+            )}
+            {/* Only render summary Text if commentSummary exists */}
+            {commentSummary && (
+              <Text style={styles.summaryText}>{commentSummary}</Text>
+            )}
             {!isCommentLoading && !commentError && !commentSummary && (
                 <Text style={styles.infoText}>Comment summary not available or could not be generated.</Text>
             )}

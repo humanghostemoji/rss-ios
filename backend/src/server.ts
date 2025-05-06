@@ -34,7 +34,7 @@ const openai = new OpenAI({
 });
 
 const app = express();
-const port = process.env.PORT || 3001; // Use correct port
+const port = process.env.PORT || 3000; // Use 3000 as default to match fly.toml
 
 app.use(express.json());
 
