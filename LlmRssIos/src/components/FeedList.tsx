@@ -55,7 +55,18 @@ const FeedList = ({ feeds, navigation }: FeedListProps) => {
       <FlatList
         data={feeds}
         renderItem={renderItem}
-        keyExtractor={item => item.id} // Use the item's ID from the parser
+        // Modify keyExtractor for robustness
+        keyExtractor={(item, index) => {
+          // Log the id being considered
+          console.log(`FeedList Key Extractor - Index: ${index}, ID: ${item?.id}, Type: ${typeof item?.id}`);
+          if (item && typeof item.id === 'string' && item.id.length > 0) {
+            return item.id;
+          }
+          // Fallback or warning if id is missing/invalid
+          console.warn(`FeedList: Missing or invalid id for item at index ${index}. Using index as key fallback.`);
+          // Use index as fallback key (prefix ensures it's a string and avoids collision with potential numeric IDs)
+          return `index-${index}`; 
+        }}
         style={styles.list}
         // Add initialNumToRender for performance with long lists
         initialNumToRender={10}
