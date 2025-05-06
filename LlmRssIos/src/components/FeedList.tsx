@@ -1,7 +1,8 @@
 import React from 'react';
-import { View, Text, StyleSheet, FlatList, TouchableOpacity } from 'react-native';
+import { View, Text, StyleSheet, FlatList, TouchableOpacity, RefreshControl } from 'react-native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack'; 
 import { RootStackParamList } from '../navigation/types'; 
+import ReactNativeHapticFeedback from "react-native-haptic-feedback";
 
 // Adjust the type based on react-native-rss-parser output
 // Common fields include id, title, links (array), description, published
@@ -26,12 +27,21 @@ type FeedListNavigationProp = NativeStackNavigationProp<
 type FeedListProps = {
   feeds: FeedItem[];
   navigation: FeedListNavigationProp; // Add navigation prop
+  onRefresh?: () => void; // Optional onRefresh prop
+  refreshing?: boolean; // Optional refreshing prop
+};
+
+// Optional configuration for haptic feedback
+const hapticOptions = {
+  enableVibrateFallback: true,
+  ignoreAndroidSystemSettings: false,
 };
 
 // Destructure navigation from props
-const FeedList = ({ feeds, navigation }: FeedListProps) => {
+const FeedList = ({ feeds, navigation, onRefresh, refreshing }: FeedListProps) => {
 
   const handlePress = (item: FeedItem) => {
+    ReactNativeHapticFeedback.trigger("impactLight", hapticOptions); // Haptic feedback for item press
     // Navigate to FeedDetail screen, passing the selected item
     navigation.navigate('FeedDetail', { feedItem: item });
   };
@@ -68,6 +78,15 @@ const FeedList = ({ feeds, navigation }: FeedListProps) => {
         style={styles.list}
         // Add initialNumToRender for performance with long lists
         initialNumToRender={10}
+        // Add RefreshControl for pull-to-refresh
+        refreshControl={
+          onRefresh ? (
+            <RefreshControl
+              refreshing={refreshing || false}
+              onRefresh={onRefresh}
+            />
+          ) : undefined
+        }
       />
     </View>
   );

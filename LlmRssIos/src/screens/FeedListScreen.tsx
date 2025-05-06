@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 import * as rssParser from 'react-native-rss-parser';
 import { NativeStackScreenProps } from '@react-navigation/native-stack'; // For navigation props type
+import ReactNativeHapticFeedback from "react-native-haptic-feedback"; // Import new haptic library
 
 import FeedList from '../components/FeedList'; // Adjust path
 import { RootStackParamList } from '../navigation/types.ts'; // We'll define this later
@@ -34,6 +35,12 @@ const FeedListScreen = ({ navigation }: Props) => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedFeed, setSelectedFeed] = useState<FeedSource>('HN'); // Default to HN
+
+  // Optional configuration for haptic feedback
+  const hapticOptions = {
+    enableVibrateFallback: true,
+    ignoreAndroidSystemSettings: false,
+  };
 
   // Effect to update navigation header title when selectedFeed changes
   useLayoutEffect(() => {
@@ -102,6 +109,12 @@ const FeedListScreen = ({ navigation }: Props) => {
     fetchFeed(selectedFeed); // Fetch based on selected feed
   }, [selectedFeed, fetchFeed]); // Re-run effect when selectedFeed changes
 
+  const onRefresh = useCallback(async () => {
+    console.log('Refreshing feed...');
+    ReactNativeHapticFeedback.trigger("impactMedium", hapticOptions); // Haptic feedback for refresh
+    await fetchFeed(selectedFeed);
+  }, [fetchFeed, selectedFeed, hapticOptions]);
+
   const backgroundStyle = {
     flex: 1,
     backgroundColor: isDarkMode ? '#1C1C1E' : '#F2F2F7',
@@ -147,7 +160,12 @@ const FeedListScreen = ({ navigation }: Props) => {
         {error && <Text style={styles.errorText}>Error: {error}</Text>}
         {!loading && !error && (
           // Pass navigation prop to FeedList
-          <FeedList feeds={feedItems} navigation={navigation} />
+          <FeedList
+            feeds={feedItems}
+            navigation={navigation}
+            onRefresh={onRefresh} // Pass onRefresh handler
+            refreshing={loading} // Pass loading state for RefreshControl
+          />
         )}
       </View>
     </SafeAreaView>
