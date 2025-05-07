@@ -10,51 +10,87 @@ type Props = NativeStackScreenProps<RootStackParamList, 'FeedDetail'>;
 
 const FeedDetailScreen = ({ route }: Props) => {
   const { feedItem } = route.params;
+  // console.log('[FeedDetailScreen] Item ID received:', JSON.stringify(feedItem.id));
+  // console.log('[FeedDetailScreen] Original feedItem.description:', feedItem.description);
+  // console.log('[FeedDetailScreen] Original feedItem.sourceType:', feedItem.sourceType);
+  // console.log('[FeedDetailScreen] Original feedItem.links:', JSON.stringify(feedItem.links));
+
   // State for Comment Summary
   const [commentSummary, setCommentSummary] = useState<string | null>(null);
   const [isCommentLoading, setIsCommentLoading] = useState<boolean>(false);
   const [commentError, setCommentError] = useState<string | null>(null);
+
   // State for Article Summary
-  const [articleSummary, setArticleSummary] = useState<string | null>(null);
+  // For Wikipedia, feedItem.description is the main content.
+  // For other types, it might be fetched.
+  const [articleSummary, setArticleSummary] = useState<string | null>(
+    feedItem.sourceType === 'wikipedia' ? feedItem.description || 'Summary loading or not available.' : null
+  );
   const [isArticleLoading, setIsArticleLoading] = useState<boolean>(false);
   const [articleError, setArticleError] = useState<string | null>(null);
 
   useEffect(() => {
     const fetchSummaries = async () => {
       const commentUrl = feedItem.commentLink;
+      // Use the first link as the article URL if it exists
       const articleUrl = feedItem.links?.[0]?.url;
 
-      // Reset states
-      setIsCommentLoading(!!commentUrl); 
-      setIsArticleLoading(!!articleUrl); 
-      setCommentError(null);
-      setArticleError(null);
-      setCommentSummary(null);
-      setArticleSummary(null);
+      // Define the backend endpoint
+      const backendUrl = 'http://localhost:3001/api/summarize';
 
-      if (!commentUrl && !articleUrl) {
-          setCommentError('No comment link available.');
-          setArticleError('No article link available.');
-          setIsCommentLoading(false);
-          setIsArticleLoading(false);
-          return;
+      // Reset states selectively
+      setIsCommentLoading(!!commentUrl);
+      setCommentError(null);
+      setCommentSummary(null);
+
+      // Only set article loading/error if we intend to fetch it for non-Wikipedia items
+      // or if it's a Wikipedia item AND we have a specific articleUrl to fetch (future enhancement?)
+      let shouldFetchArticleSummary = !!articleUrl && feedItem.sourceType !== 'wikipedia';
+      // As a potential future enhancement, we could allow summarizing a specific link even for Wikipedia items
+      // if (feedItem.sourceType === 'wikipedia' && articleUrl) { /* shouldFetchArticleSummary = true; */ }
+
+      setIsArticleLoading(shouldFetchArticleSummary);
+      setArticleError(null);
+      if (shouldFetchArticleSummary) {
+        setArticleSummary(null); // Clear only if fetching for non-Wikipedia
+      }
+
+      // If it's Wikipedia, we've already set articleSummary from feedItem.description.
+      // If no commentUrl AND (it's Wikipedia OR no articleUrl for other types), nothing to fetch.
+      if (!commentUrl && !shouldFetchArticleSummary) {
+        if (!commentUrl) setCommentError('No comment link available.');
+        // For Wikipedia, if no articleUrl, the main summary is already set. No error needed for article here.
+        // For non-Wikipedia, if no articleUrl, it means no article to summarize.
+        if (!articleUrl && feedItem.sourceType !== 'wikipedia') {
+            setArticleError('No article link available to summarize.');
+        }
+        setIsCommentLoading(false);
+        setIsArticleLoading(false);
+        return;
       }
       
-      try {
-        const backendUrl = 'https://backend-quiet-shadow-7161.fly.dev/api/summarize'; 
-        console.log(`Attempting to fetch summaries from ${backendUrl}`);
-        console.log(`  Comment URL: ${commentUrl}`);
-        console.log(`  Article URL: ${articleUrl}`);
+      // Prepare payload for POST /api/summarize
+      const payload: { itemUrl?: string; articleUrl?: string } = {};
+      if (commentUrl) payload.itemUrl = commentUrl;
+      if (shouldFetchArticleSummary && articleUrl) payload.articleUrl = articleUrl; // Only include articleUrl if we are fetching it
 
+      // Only proceed with fetch if there's something to fetch
+      if (!payload.itemUrl && !payload.articleUrl) {
+        console.log('[FeedDetailScreen] No URLs to fetch summaries for.');
+        if (commentUrl) setIsCommentLoading(false); // Should already be false if no commentUrl
+        if (shouldFetchArticleSummary) setIsArticleLoading(false); // Should already be false if not fetching
+        return;
+      }
+
+      try {
+        // console.log(`[FeedDetailScreen] Attempting to fetch summaries from ${backendUrl} with payload:`, JSON.stringify(payload));
+        
         const response = await fetch(backendUrl, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({ 
-              itemUrl: commentUrl, 
-              articleUrl: articleUrl 
-          }),
+          body: JSON.stringify(payload),
         });
 
         if (!response.ok) {
@@ -75,7 +111,7 @@ const FeedDetailScreen = ({ route }: Props) => {
 
         if (data.articleSummary) {
             setArticleSummary(data.articleSummary);
-        } else if (articleUrl) {
+        } else if (shouldFetchArticleSummary && articleUrl) {
             const errMsg = 'Could not generate article summary from backend.';
             console.warn(errMsg);
             setArticleError(errMsg); 
@@ -84,9 +120,9 @@ const FeedDetailScreen = ({ route }: Props) => {
       } catch (err: any) {
         console.error('Fetch Summaries Error:', err);
         const errorMessage = err.message || 'Failed to fetch summaries. Is the backend server running?';
-        console.error(`Setting error state: CommentURL=${!!commentUrl}, ArticleURL=${!!articleUrl}, Message=${errorMessage}`);
+        console.error(`[FeedDetailScreen] Setting error state: CommentURL=${!!commentUrl}, ArticleURL=${shouldFetchArticleSummary && !!articleUrl}, Message=${errorMessage}`);
         if (commentUrl) setCommentError(errorMessage);
-        if (articleUrl) setArticleError(errorMessage);
+        if (shouldFetchArticleSummary && articleUrl) setArticleError(errorMessage);
       } finally {
         setIsCommentLoading(false);
         setIsArticleLoading(false);
@@ -104,33 +140,41 @@ const FeedDetailScreen = ({ route }: Props) => {
       {/* Ensure title is a string before rendering */}
       <Text style={styles.title}>{feedItem.title ?? 'No Title'}</Text>
 
-      {/* === Article Summary Section (Moved Up) === */}
-      {feedItem.links?.[0]?.url && (
-          <View style={styles.summaryContainer}> {/* First container doesn't need extra margin */} 
-            <Text style={styles.summaryTitle}>Article Summary:</Text>
-            {isArticleLoading && (
-              <View style={styles.centerContent}>
-                <ActivityIndicator size="large" color="#007AFF" /> 
-              </View>
-            )}
-            {/* Only render error Text if articleError exists */}
-            {articleError && (
-              <Text style={styles.errorText}>Article Error: {articleError}</Text>
-            )}
-            {/* Only render summary Text if articleSummary exists */}
-            {articleSummary && (
-              <Text style={styles.summaryText}>{articleSummary}</Text>
-            )}
-            {!isArticleLoading && !articleError && !articleSummary && (
-                <Text style={styles.infoText}>Article summary not available or could not be generated.</Text>
-            )}
+      {/* === Article Content Section (Previously Article Summary) === */}
+      {/* For Wikipedia, feedItem.description is the primary content */}
+      {/* For other sources, articleSummary state holds the fetched summary */}
+      <View style={styles.summaryContainer}>
+        <Text style={styles.summaryTitle}>
+          {feedItem.sourceType === 'wikipedia' ? 'Event Details:' : 'Article Summary:'}
+        </Text>
+        {isArticleLoading && feedItem.sourceType !== 'wikipedia' && (
+          <View style={styles.centerContent}>
+            <ActivityIndicator size="large" color="#007AFF" />
           </View>
-      )}
-       {!feedItem.links?.[0]?.url && (
-          <Text style={styles.infoText}>No article link found for this item.</Text>
+        )}
+        {articleError && feedItem.sourceType !== 'wikipedia' && (
+          <Text style={styles.errorText}>Article Error: {articleError}</Text>
+        )}
+        {articleSummary ? (
+          <Text style={styles.summaryText}>{articleSummary}</Text>
+        ) : (
+          !isArticleLoading && feedItem.sourceType !== 'wikipedia' && !articleError && (
+            <Text style={styles.infoText}>Article summary not available or could not be generated.</Text>
+          )
+        )}
+        {/* This handles the case where it's Wikipedia and description might be empty initially, or non-wiki and no summary/error/loading */}
+        {!articleSummary && !isArticleLoading && feedItem.sourceType === 'wikipedia' && (
+            <Text style={styles.infoText}>Details for this event are not available.</Text>
+        )}
+      </View>
+
+      {/* Display "No article link" only if source is not Wikipedia OR if it is Wikipedia but has no links AND no summary (edge case) */}
+      {!feedItem.links?.[0]?.url && 
+        (feedItem.sourceType !== 'wikipedia' || (feedItem.sourceType === 'wikipedia' && !articleSummary)) && (
+        <Text style={styles.infoText}>No article link found for this item.</Text>
       )}
       
-      {/* === Comment Summary Section (Moved Down) === */}
+      {/* === Comment Summary Section === */}
       {feedItem.commentLink && (
           // Apply specific style for margin top to the second container
           <View style={[styles.summaryContainer, styles.commentSummaryContainer]}> 

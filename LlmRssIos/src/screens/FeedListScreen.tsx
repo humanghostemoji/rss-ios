@@ -18,13 +18,38 @@ import FeedList from '../components/FeedList'; // Adjust path
 import { RootStackParamList } from '../navigation/types.ts'; // We'll define this later
 import { FeedItem } from '../components/FeedList';
 
-// Define Feed Sources
-const FEED_SOURCES = {
-  HN: 'https://news.ycombinator.com/rss',
-  Wikipedia: '', // Placeholder for Wikipedia feed URL
+// Define the structure for items returned by the backend for Wikipedia
+type ProcessedWikipediaEvent = {
+  id: string; // Unique ID for the processed event block from backend
+  date: string | undefined; // Original publication date of the daily entry
+  topicTitle: string; // First line of the event block, now processed title from backend
+  llmSummary: string | null; // The detailed summary from the LLM for this specific block
+  originalBlockText: string; // The full text of the original block
+  sourceLinks: { url: string; text: string }[]; // Links extracted by backend
 };
 
-type FeedSource = keyof typeof FEED_SOURCES; // 'HN' | 'Wikipedia'
+export type FeedSource = {
+  key: string;
+  title: string;
+  url: string;
+  type: 'hackernews' | 'wikipedia' | 'other';
+};
+
+export const FEED_SOURCES: FeedSource[] = [
+  {
+    key: 'hackernews',
+    title: 'Hacker News',
+    url: 'https://hnrss.org/frontpage',
+    type: 'hackernews',
+  },
+  {
+    key: 'wikipedia',
+    title: 'Wikipedia Current Events',
+    url: 'http://localhost:3001/api/wikipedia-daily-events', // Updated URL
+    type: 'wikipedia',
+  },
+  // Add other feed sources here
+];
 
 // Define navigation props type for this screen
 type Props = NativeStackScreenProps<RootStackParamList, 'FeedList'>;
@@ -34,7 +59,7 @@ const FeedListScreen = ({ navigation }: Props) => {
   const [feedItems, setFeedItems] = useState<FeedItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [selectedFeed, setSelectedFeed] = useState<FeedSource>('HN'); // Default to HN
+  const [selectedFeed, setSelectedFeed] = useState<FeedSource>(FEED_SOURCES[0]); // Default to first feed
 
   // Optional configuration for haptic feedback
   const hapticOptions = {
@@ -44,7 +69,7 @@ const FeedListScreen = ({ navigation }: Props) => {
 
   // Effect to update navigation header title when selectedFeed changes
   useLayoutEffect(() => {
-    navigation.setOptions({ title: `${selectedFeed} Feed` });
+    navigation.setOptions({ title: `${selectedFeed.title} Feed` });
   }, [navigation, selectedFeed]);
 
   const fetchFeed = useCallback(async (source: FeedSource) => {
@@ -52,50 +77,74 @@ const FeedListScreen = ({ navigation }: Props) => {
     setError(null);
     setFeedItems([]); // Clear previous items when switching feeds
 
-    const url = FEED_SOURCES[source];
-    if (!url) {
-      console.warn(`No URL defined for feed source: ${source}`);
-      setError(`Feed URL for ${source} is not configured yet.`);
-      setLoading(false);
-      return;
-    }
-
-    console.log(`Fetching feed from: ${url}`);
+    console.log(`Fetching feed from: ${source.url}`);
     try {
-      const response = await fetch(url);
+      const response = await fetch(source.url);
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
-      const responseData = await response.text();
-      const parsed = await rssParser.parse(responseData);
 
-      // Process items to extract the correct comment link
-      const processedItems = (Array.isArray(parsed.items) ? parsed.items : []).map((item: FeedItem) => {
-        let hnCommentLink: string | undefined = undefined;
+      let items: FeedItem[] = [];
 
-        // Extract HN comment URL from the description field's <a> tag href
-        if (item.description) {
-          const match = item.description.match(/<a href="(https?:\/\/news\.ycombinator\.com\/item\?id=\d+)">/);
-          if (match && match[1]) {
-            hnCommentLink = match[1];
-          }
-        }
+      if (source.type === 'hackernews') {
+        const text = await response.text();
+        // Corrected RSS parser usage for react-native-rss-parser
+        const parsedFeed = await rssParser.parse(text); 
+        items = parsedFeed.items.map((item: any) => ({
+          id: item.id || item.link || `hn-${Date.now()}-${Math.random()}`,
+          title: item.title || 'No title',
+          // Ensure links is an array, provide default if undefined or not an array
+          links: Array.isArray(item.links) ? item.links.map((link: any) => ({ url: link.url, rel: link.rel })) : [],
+          description: item.description || '',
+          published: item.published || new Date().toISOString(),
+          sourceType: source.type,
+          // commentLink specific to HN
+          commentLink: (item.comments && typeof item.comments === 'string' && item.comments.includes('news.ycombinator.com/item?id=')) ? item.comments : undefined,
+        }));
+      } else if (source.type === 'wikipedia') {
+        // Backend now returns an array of already processed event objects with LLM summaries
+        const processedEvents: ProcessedWikipediaEvent[] = await response.json();
+        console.log(`Received ${processedEvents.length} processed Wikipedia event items from backend.`);
 
-        // Fallback: If not in description, check 'comments' or 'id' (less likely now)
-        // Example: some feeds might put it in item.comments or item.id
-        if (!hnCommentLink && item.comments && typeof item.comments === 'string' && item.comments.includes('news.ycombinator.com/item?id=')) {
-          hnCommentLink = item.comments;
-        } else if (!hnCommentLink && item.id && typeof item.id === 'string' && item.id.includes('news.ycombinator.com/item?id=')) {
-          hnCommentLink = item.id;
-        }
+        items = processedEvents.map((event) => {
+          const firstLink = event.sourceLinks && event.sourceLinks.length > 0 ? event.sourceLinks[0].url : undefined;
+          console.log(`Wikipedia item ID: ${event.id} - Title: ${event.topicTitle}`);
+          console.log('Source Links Received:', JSON.stringify(event.sourceLinks, null, 2));
+          console.log('Derived firstLink:', firstLink);
 
-        return {
-          ...item,
-          commentLink: hnCommentLink, // Add the extracted link
-        };
-      });
+          const descriptionForDetail = event.llmSummary || event.originalBlockText; // Prefer LLM summary
 
-      setFeedItems(processedItems);
+          return {
+            id: event.id,
+            title: event.topicTitle,
+            link: firstLink, // Use the first link found in the block
+            published: event.date || new Date().toISOString(), // Use date from backend, fallback to now
+            contentSnippet: (event.llmSummary || event.originalBlockText).substring(0, 150), // Snippet from LLM summary or original text
+            sourceType: source.type,
+            description: descriptionForDetail, // This will be used by FeedDetailScreen
+            links: event.sourceLinks.map(sl => ({ url: sl.url, rel: 'alternate' })), // Map to FeedItem links structure
+            // commentLink is not applicable for Wikipedia items
+          } as FeedItem; // Cast to FeedItem type
+        });
+        
+        console.log(`Mapped ${items.length} Wikipedia event items for display.`);
+
+      } else {
+        const text = await response.text();
+        // Corrected RSS parser usage for react-native-rss-parser
+        const parsedFeed = await rssParser.parse(text);
+        items = parsedFeed.items.map((item: any) => ({
+          id: item.id || item.link || `other-${Date.now()}-${Math.random()}`,
+          title: item.title || 'No title',
+          // Ensure links is an array, provide default if undefined or not an array
+          links: Array.isArray(item.links) ? item.links.map((link: any) => ({ url: link.url, rel: link.rel })) : [],
+          description: item.description || '',
+          published: item.published || new Date().toISOString(),
+          sourceType: source.type,
+        }));
+      }
+
+      setFeedItems(items);
     } catch (e) {
       console.error("Failed to fetch or parse feed:", e);
       setError(e instanceof Error ? e.message : 'An unknown error occurred');
@@ -130,23 +179,23 @@ const FeedListScreen = ({ navigation }: Props) => {
       <View style={styles.container}>
         {/* Feed Source Selector */}
         <View style={styles.feedSelectorContainer}>
-          {Object.keys(FEED_SOURCES).map((source) => (
+          {FEED_SOURCES.map((source) => (
             <TouchableOpacity
-              key={source}
+              key={source.key}
               style={[
                 styles.feedSelectorButton,
-                selectedFeed === source && styles.feedSelectorButtonActive,
+                selectedFeed.key === source.key && styles.feedSelectorButtonActive,
               ]}
-              onPress={() => setSelectedFeed(source as FeedSource)} // Fix typo: FeedFeedSource -> FeedSource
+              onPress={() => setSelectedFeed(source)} // Fix typo: FeedFeedSource -> FeedSource
               disabled={loading} // Disable while loading
             >
               <Text
                 style={[
                   styles.feedSelectorText,
-                  selectedFeed === source && styles.feedSelectorTextActive,
+                  selectedFeed.key === source.key && styles.feedSelectorTextActive,
                 ]}
               >
-                {source}
+                {source.title}
               </Text>
             </TouchableOpacity>
           ))}

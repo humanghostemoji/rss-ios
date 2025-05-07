@@ -1,227 +1,254 @@
 // src/server.ts
 
+import express, { Request, Response, RequestHandler, NextFunction } from 'express';
+import axios from 'axios';
+import { Readability } from '@mozilla/readability';
+import { JSDOM } from 'jsdom';
+import { OpenAI } from 'openai';
 import dotenv from 'dotenv';
-dotenv.config(); // Load environment variables FIRST
+import Parser from 'rss-parser';
 
-import express, { Request, Response, RequestHandler } from 'express';
-import OpenAI from 'openai'; // Import OpenAI
-import axios from 'axios'; // Import axios
-import * as cheerio from 'cheerio'; // Import cheerio
-import { Readability } from '@mozilla/readability'; // Import Readability
-import { JSDOM } from 'jsdom'; // Import JSDOM
-import { parse } from 'node-html-parser'; // Import node-html-parser
+dotenv.config();
 
-// Define interface for request body
-interface SummarizeRequestBody {
-  itemUrl?: string; // HN comment page URL
-  articleUrl?: string; // Original article URL
-}
+const app = express();
+const port = process.env.PORT || 3001;
 
-// Define interface for response body
-interface SummaryResponseBody {
-  commentSummary?: string; // Renamed for clarity
-  articleSummary?: string; // Add article summary
-  error?: string;
-  details?: string | { 
-    commentError?: string;
-    articleError?: string;
-  };
-}
-
-// Initialize OpenAI client
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-const app = express();
-const port = process.env.PORT || 3000; // Use 3000 as default to match fly.toml
-
 app.use(express.json());
 
-app.get('/', (req: Request, res: Response) => {
-  res.send('RSS Summarizer Backend is running!');
-});
-
-// Helper function to summarize text with OpenAI
-async function getOpenAISummary(prompt: string, content: string, model: string = 'gpt-3.5-turbo'): Promise<string | null> {
-  try {
-    const openaiResponse = await openai.chat.completions.create({
-      model: model, // Use specified model
-      messages: [
-        { role: 'system', content: prompt },
-        { role: 'user', content: content },
-      ],
-      max_tokens: 200, // Increased slightly
-    });
-    return openaiResponse.choices[0]?.message?.content?.trim() ?? null;
-  } catch (error) {
-    console.error('Error calling OpenAI:', error);
-    return null; // Return null on OpenAI error
-  }
+// --- Helper function to strip HTML (similar to frontend util) ---
+function stripHtml(html: string | undefined): string {
+  if (!html) return '';
+  return html.replace(/<[^>]*>/g, '');
 }
 
-// Function to summarize article content
-async function summarizeArticle(articleUrl: string): Promise<string | null> {
-  if (!articleUrl) return null;
-  console.log(`  Attempting to fetch article content from: ${articleUrl}`);
+// --- Helper function to extract links from text ---
+function extractLinks(text: string): { url: string; text: string }[] {
+  if (!text) return [];
+  const links: { url: string; text: string }[] = [];
+  const regex = /<a\s+(?:[^>]*?\s+)?href=(['"])(.*?)\1[^>]*?>(.*?)<\/a>/gi;
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    links.push({ url: match[2], text: stripHtml(match[3]) }); // Store link URL and link text (stripped)
+  }
+  return links;
+}
+
+// Define interface for request body for /api/summarize
+interface SummarizeRequestBody {
+  text?: string; // Text to summarize (e.g. from Wikipedia feed item)
+  url?: string;  // URL of the article to fetch and summarize
+  itemUrl?: string; // Fallback URL from the feed item, if different from content URL
+  summaryType?: 'article' | 'comment' | 'wikipedia_event_block'; // Added to guide prompt engineering
+}
+
+// Define interface for response body for /api/summarize
+interface SummaryResponseBody {
+  summary: string;
+  error?: string; // Optional error message
+}
+
+// Define a type for our custom feed item structure for Wikipedia
+type WikipediaDailyEvent = {
+  title: string | undefined;
+  content: string | undefined; // This will be the HTML string
+  published: string | undefined;
+  links: { url: string; rel: string }[] | undefined;
+  id: string | undefined;
+};
+
+// Define a type for the new structured Wikipedia event object
+type ProcessedWikipediaEvent = {
+  id: string;
+  date: string | undefined;
+  topicTitle: string;
+  llmSummary: string | null;
+  originalBlockText: string;
+  sourceLinks: { url: string; text: string }[]; // Extracted from the block's original HTML
+};
+
+// New endpoint to fetch AND PROCESS Wikipedia daily events
+app.get('/api/wikipedia-daily-events', async (req: Request, res: Response) => {
+  const feedUrl = 'https://vikramkashyap.com/wikipedia_current_events.rss';
+  const parser = new Parser();
+  const processedEvents: ProcessedWikipediaEvent[] = [];
+  let dailyEntryCounter = 0; // To track the first entry
+
   try {
-    // Add a User-Agent header to mimic a browser
-    const response = await axios.get(articleUrl, {
+    console.log(`Fetching Wikipedia RSS feed from: ${feedUrl}`);
+    const feed = await parser.parseURL(feedUrl);
+    console.log(`Successfully fetched Wikipedia RSS. Found ${feed.items.length} daily entries.`);
+
+    for (const dailyEntry of feed.items) {
+      const dailyHtmlContent = dailyEntry.content;
+      const publishedDate = dailyEntry.pubDate || dailyEntry.isoDate;
+      const dailyEntryGuid = dailyEntry.guid || dailyEntry.id || `wp_day_${Date.now()}`;
+
+      if (!dailyHtmlContent) {
+        console.warn(`No content found for Wikipedia daily entry GUID: ${dailyEntryGuid}`);
+        continue;
+      }
+
+      // 1. Strip HTML from the daily entry's content (but keep for link extraction per block later)
+      const plainTextContent = stripHtml(dailyHtmlContent);
+      // 2. Split the plain text into blocks
+      const blocks = plainTextContent.split(/\n\s*\n/);
+
+      console.log(`Daily entry ${dailyEntryGuid}: processing ${blocks.length} text blocks.`);
+      console.log(`DEBUG: dailyHtmlContent for ${dailyEntryGuid}:\n`, dailyHtmlContent);
+
+      let blockIndex = 0;
+      for (const blockText of blocks) {
+        const trimmedBlock = blockText.trim();
+        if (!trimmedBlock) continue;
+
+        const eventId = `${dailyEntryGuid}_event_${blockIndex++}`;
+        const topicTitle = trimmedBlock.split('\n')[0] || 'Untitled Event';
+        
+        // Find original HTML for this block to extract links accurately
+        // This is a simplification; robustly matching plain text block to original HTML block can be complex.
+        // For now, we'll extract links from the whole dailyHtmlContent and assign if relevant.
+        // A better approach might be to parse HTML into blocks first.
+        // However, the prompt now implies summarizing each topic (block) and then conditionally fetching if topic is new.
+        // For THIS iteration, let's extract links from the daily HTML and attach all of them if any. Future iteration can refine link-to-block mapping.
+        const allLinksInDailyEntry = extractLinks(dailyHtmlContent);
+
+        console.log(`DEBUG: Extracted links for ${dailyEntryGuid}:`, JSON.stringify(allLinksInDailyEntry));
+
+        let llmSummary: string | null = null;
+        try {
+          console.log(`Summarizing block for event ID: ${eventId}, Title: ${topicTitle}`);
+          const prompt = `Concisely summarize the following news event excerpt from Wikipedia. Highlight key actions, entities, and outcomes. Event Excerpt:\n\n${trimmedBlock}`;
+          const completion = await openai.completions.create({
+            model: 'gpt-3.5-turbo-instruct',
+            prompt: prompt,
+            max_tokens: 200, // Adjust as needed for block summaries
+            temperature: 0.3,
+          });
+          llmSummary = completion.choices[0].text.trim();
+          console.log(`Successfully summarized block for event ID: ${eventId}. Summary length: ${llmSummary?.length}`);
+        } catch (summaryError) {
+          console.error(`Error summarizing block for event ID ${eventId}:`, summaryError);
+          llmSummary = "Summary not available."; // Or handle as an error state
+        }
+
+        processedEvents.push({
+          id: eventId,
+          date: publishedDate,
+          topicTitle: topicTitle,
+          llmSummary: llmSummary,
+          originalBlockText: trimmedBlock,
+          sourceLinks: allLinksInDailyEntry, // For now, all links from the day's content
+        });
+      }
+      dailyEntryCounter++;
+    }
+
+    console.log(`Returning ${processedEvents.length} processed Wikipedia event items.`);
+    res.json(processedEvents);
+  } catch (error) {
+    console.error('Error in /api/wikipedia-daily-events endpoint:', error);
+    res.status(500).json({ message: 'Failed to fetch or process Wikipedia daily events', error: (error as Error).message });
+  }
+});
+
+// --- Function to fetch and extract main content from a URL ---
+async function fetchContentFromURL(url: string, res: express.Response<SummaryResponseBody>): Promise<string | null> {
+  try {
+    console.log(`Fetching content from URL: ${url}`);
+    const response = await axios.get(url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-      },
-      timeout: 15000 // 15 second timeout
+      }
     });
-
-    // Check if content type is HTML before trying to parse
-    const contentType = response.headers['content-type'];
-    if (!contentType || !contentType.includes('text/html')) {
-      console.warn(`  Skipping article summary for ${articleUrl} - Content-Type is not HTML (${contentType})`);
-      return null;
-    }
-
     const html = response.data;
-    
-    // Use JSDOM to parse the HTML string into a DOM
-    const dom = new JSDOM(html, { url: articleUrl });
-    // Pass the JSDOM document object to Readability
-    const reader = new Readability(dom.window.document);
+    const doc = new JSDOM(html, { url });
+    const reader = new Readability(doc.window.document);
     const article = reader.parse();
 
-    if (!article || !article.textContent) {
-      console.warn(`  Readability could not extract main content from ${articleUrl}`);
-      return null;
+    if (article && article.textContent) {
+      console.log(`Successfully extracted content from ${url}. Length: ${article.textContent.length}`);
+      return article.textContent;
     }
-
-    console.log(`  Extracted article content (${article.textContent.length} chars) from ${articleUrl}`);
-    const maxArticleLength = 20000; // Limit input length
-    const truncatedContent = article.textContent.length > maxArticleLength 
-                               ? article.textContent.substring(0, maxArticleLength) + '...' 
-                               : article.textContent;
-
-    const prompt = 'You are a helpful assistant. Summarize the key points of the following article concisely for a mobile app reader.';
-    const summary = await getOpenAISummary(prompt, `Article Title: ${article.title || 'N/A'}\n\nContent:\n${truncatedContent}`, 'gpt-3.5-turbo'); // Use 3.5-turbo for potentially longer articles
-    console.log(`  Generated article summary for ${articleUrl}`);
-    return summary;
-
-  } catch (error: any) {
-    console.error(`  Error fetching/parsing article ${articleUrl}:`, error.message);
+    console.warn(`Could not extract readable content from ${url}`);
+    // Corrected error response format
+    res.status(500).json({ summary: '', error: 'Failed to extract readable content from URL' });
+    return null;
+  } catch (error) {
+    console.error(`Error fetching or parsing URL ${url}:`, error);
+    // Corrected error response format
+    res.status(500).json({ summary: '', error: `Failed to fetch or parse URL: ${(error as Error).message}` });
     return null;
   }
 }
 
-// --- Main Request Handler --- 
-const summarizeHandler: RequestHandler<{}, SummaryResponseBody, SummarizeRequestBody> = async (req, res) => {
-  const { itemUrl, articleUrl } = req.body; // Extract both URLs
-  console.log(`[${new Date().toISOString()}] Received POST request for /api/summarize`); 
-  console.log(`  Received itemUrl: ${itemUrl}`); 
-  console.log(`  Received articleUrl: ${articleUrl}`);
+// Corrected summarizeHandler signature and logic
+// Standard Express handler: (req, res, next) for RequestHandler type
+const summarizeHandler: RequestHandler<{}, SummaryResponseBody, SummarizeRequestBody> = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { text, url, itemUrl, summaryType } = req.body;
+    let contentToSummarize: string | null = text || null;
+    let finalUrlForContext = url || itemUrl;
 
-  if ((!itemUrl || typeof itemUrl !== 'string') && (!articleUrl || typeof articleUrl !== 'string')) {
-    console.error('  Error: Missing or invalid itemUrl AND articleUrl'); 
-    res.status(400).json({ error: 'Missing both itemUrl and articleUrl' });
-    return; 
-  }
+    console.log(`[${new Date().toISOString()}] Received POST request for /api/summarize`);
+    console.log(`  SummaryType: ${summaryType}, URL: ${url}, Text Provided: ${!!text}, ItemURL: ${itemUrl}, ArticleURL: ${req.body.url}`);
 
-  if (!process.env.OPENAI_API_KEY) {
-    console.error('  Error: OpenAI API key not configured'); 
-    res.status(500).json({ error: 'OpenAI API key not configured' });
-    return; 
-  }
-
-  let commentSummary: string | null = null;
-  let articleSummary: string | null = null; // Declare articleSummary here
-  let commentError: string | undefined = undefined;
-  let articleError: string | undefined = undefined;
-  let extractedCommentsText: string | null = null; // Re-declare extractedCommentsText here
-
-  // --- Summarize Comments (if itemUrl provided) --- 
-  if (itemUrl && typeof itemUrl === 'string') {
-    try {
-      console.log(`  Attempting to fetch comments from: ${itemUrl}`); 
-      const response = await axios.get(itemUrl, {
-        headers: { 'User-Agent': 'Mozilla/5.0 ... Safari/537.36' }, 
-        timeout: 10000
-      });
-      const html = response.data;
-      const $ = cheerio.load(html);
-      const comments: string[] = [];
-      $('.commtext').each((_i, el) => { comments.push($(el).text()); });
-      console.log(`  Extracted ${comments.length} comments`); 
-
-      if (comments.length > 0) {
-        const commentsText = comments.join('\n\n---\n\n');
-        const maxCommentLength = 15000;
-        // Assign to extractedCommentsText
-        extractedCommentsText = commentsText.length > maxCommentLength ? commentsText.substring(0, maxCommentLength) + '...' : commentsText;
-      }
-    } catch (error: any) {
-      console.error(`  Error fetching/parsing comments ${itemUrl}:`, error.message);
-      commentError = error.message; // Store specific comment error
-      // Don't assign to commentSummary here, it should remain null
+    if (!contentToSummarize && url) {
+      console.log(`No text provided, fetching content from primary URL: ${url}`);
+      contentToSummarize = await fetchContentFromURL(url, res);
+      if (!contentToSummarize) return; // fetchContentFromURL already sent a response
+    } else if (!contentToSummarize && itemUrl) {
+      console.log(`No text and no primary URL, fetching content from itemURL: ${itemUrl}`);
+      contentToSummarize = await fetchContentFromURL(itemUrl, res);
+      finalUrlForContext = itemUrl;
+      if (!contentToSummarize) return; // fetchContentFromURL already sent a response
     }
-  }
 
-  // --- Summarize Article (if articleUrl provided) ---
-  try {
-    articleSummary = await summarizeArticle(articleUrl as string);
-  } catch (error: any) {
-    console.error(`  Error fetching/parsing article ${articleUrl}:`, error.message);
-    articleError = error.message; // Store specific article error
-    // Don't assign to articleSummary here, it should remain null
-  }
+    if (!contentToSummarize) {
+      console.log('No content available for summarization.');
+      // Corrected error response format
+      return res.status(400).json({ summary: '', error: 'No content provided or found for summarization' });
+    }
 
-  // --- Summarize Comments with OpenAI (if comments were extracted) ---
-  let commentSummaryPromise: Promise<string | null> = Promise.resolve(null);
-  // Check extractedCommentsText here
-  if (extractedCommentsText) { 
-    console.log(`  Sending ${extractedCommentsText.length} chars of comments to OpenAI...`);
-    const commentPrompt = 'You are a helpful assistant that summarizes Hacker News comment threads based on the structured prompt below.';
-    // Keep your detailed comment prompt here
-    commentSummaryPromise = getOpenAISummary(commentPrompt, extractedCommentsText, 'gpt-4.1-nano'); 
-  } else if (itemUrl && typeof itemUrl === 'string' && !commentError) {
-      // Handle case where comments were fetched but empty, or fetch failed silently
-      console.warn(`  No comments text extracted or available to send to OpenAI for ${itemUrl}`);
-  }
+    let prompt = `Please summarize the following text clearly and concisely.`;
+    if (summaryType === 'article') {
+      prompt = `Please provide a concise summary of the following article content. Focus on the main points, key arguments, and conclusions. Article content:`;
+    } else if (summaryType === 'comment') {
+      prompt = `Please summarize the key points or arguments from the following comments or discussion. Comments:`;
+    } else if (summaryType === 'wikipedia_event_block') {
+      prompt = `Concisely summarize the following news event excerpt from Wikipedia. Highlight key actions, entities, and outcomes. Event Excerpt:`;
+    }
+    
+    prompt += `\n\n${contentToSummarize}`;
+    if (finalUrlForContext) {
+      prompt += `\n\n(For context, this content is from or related to: ${finalUrlForContext})`;
+    }
 
-  // --- Wait for both summaries --- 
-  try {
-    [commentSummary] = await Promise.all([commentSummaryPromise]);
-    console.log('  Finished fetching/generating summaries.');
+    console.log(`Sending text (length: ${contentToSummarize.length}) to OpenAI for summarization. Type: ${summaryType || 'general'}`);
+    const completion = await openai.completions.create({
+      model: 'gpt-3.5-turbo-instruct',
+      prompt: prompt,
+      max_tokens: summaryType === 'wikipedia_event_block' ? 200 : 150, // Allow longer for wiki blocks
+      temperature: 0.5,
+    });
 
-    // Consolidate error handling
-    if (!commentSummary && !articleSummary) {
-        // If both failed, send a general error or specific errors if available
-        res.status(500).json({ 
-            error: 'Failed to generate summaries.',
-            details: {
-                commentError: commentError || 'Comment summary failed.',
-                articleError: articleError || 'Article summary failed.'
-            }
-        });
+    const summary = completion.choices[0].text.trim();
+    console.log(`Successfully received summary from OpenAI. Length: ${summary.length}`);
+    res.json({ summary });
+
+  } catch (error) {
+    console.error('Error in /api/summarize endpoint:', error);
+    // Corrected error response format
+    // Check if 'next' is available and use it for error handling to avoid crashing
+    if (next) {
+        next(error); // Pass to default Express error handler
     } else {
-        // Send successful response with whatever summaries were generated
-        res.status(200).json({
-            commentSummary: commentSummary ?? undefined, // Use nullish coalescing for clarity
-            articleSummary: articleSummary ?? undefined
-        });
+        // Fallback if next is somehow not available (should be, with RequestHandler)
+        res.status(500).json({ summary: '', error: 'Internal server error in summarization' });
     }
-
-  } catch (error: any) { 
-      console.error('\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!'); 
-      console.error('!!! ENTERED CATCH BLOCK in summarizeHandler (Summarization Phase) !!!');
-      console.error('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n');
-      console.error(`[${new Date().toISOString()}] Error during summary generation/aggregation:`);
-      if (error instanceof Error) { 
-          console.error('  General Error:', error.message);
-          console.error('  Stack:', error.stack); 
-      } else { 
-          console.error('  Unknown Error Type:', error);
-      }
-            
-      if (!res.headersSent) {
-        res.status(500).json({ error: 'Failed to process request during summarization', details: error instanceof Error ? error.message : 'Unknown error' });
-      }
   }
 };
 

@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, Text, StyleSheet, FlatList, TouchableOpacity, RefreshControl } from 'react-native';
+import { View, Text, StyleSheet, FlatList, TouchableOpacity, RefreshControl, Linking } from 'react-native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack'; 
 import { RootStackParamList } from '../navigation/types'; 
 import ReactNativeHapticFeedback from "react-native-haptic-feedback";
@@ -10,11 +10,14 @@ import ReactNativeHapticFeedback from "react-native-haptic-feedback";
 export type FeedItem = {
   id: string; // Usually a unique ID like the HN item ID or URL
   title: string;
-  links: { url: string; rel: string }[]; // Parser often gives links array
-  description?: string; // Optional description
-  published?: string; // Optional published date string
+  links: Array<{ url: string; rel: string }>; // Ensure 'links' is always an array of objects
+  description?: string; // Optional description, will be used for LLM input for Wikipedia
+  published: string; // ISO date string
   comments?: string; // Add optional comments field based on typical RSS parser output
-  commentLink?: string; // Add field to specifically store the HN comment link
+  commentLink?: string; // Add field to specifically store the HN comment link (HN specific)
+  sourceType: 'hackernews' | 'wikipedia' | 'other'; // Updated sourceType
+  contentSnippet?: string; // Optional: for a brief snippet on the card
+  link?: string; // Optional: primary link for the item, if applicable
   // Add other fields if needed, e.g., authors: { name: string }[]
 };
 
