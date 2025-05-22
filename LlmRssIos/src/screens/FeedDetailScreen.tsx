@@ -70,12 +70,12 @@ const FeedDetailScreen = ({ route }: Props) => {
       }
       
       // Prepare payload for POST /api/summarize
-      const payload: { itemUrl?: string; articleUrl?: string } = {};
+      const payload: { itemUrl?: string; url?: string } = {};
       if (commentUrl) payload.itemUrl = commentUrl;
-      if (shouldFetchArticleSummary && articleUrl) payload.articleUrl = articleUrl; // Only include articleUrl if we are fetching it
+      if (shouldFetchArticleSummary && articleUrl) payload.url = articleUrl;
 
       // Only proceed with fetch if there's something to fetch
-      if (!payload.itemUrl && !payload.articleUrl) {
+      if (!payload.itemUrl && !payload.url) {
         console.log('[FeedDetailScreen] No URLs to fetch summaries for.');
         if (commentUrl) setIsCommentLoading(false); // Should already be false if no commentUrl
         if (shouldFetchArticleSummary) setIsArticleLoading(false); // Should already be false if not fetching
