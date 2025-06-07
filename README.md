@@ -1,4 +1,4 @@
-# llm-rss-ios
+# RSS iOS App
 a beautiful ios app that has your RSS content summarized via llm 
 
 
